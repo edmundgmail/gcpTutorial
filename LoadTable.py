@@ -29,26 +29,29 @@ def list_blobs_with_prefix(bucket_name, prefix):
         ret.append(blob.name)
     return ret
 
-zipextract('big_data_landing_zone', 'sales data-set.csv.zip','unzipped') # if the file is gs://mybucket/path/file.zip
-files = list_blobs_with_prefix('big_data_landing_zone','unzipped')
 
-project_id='big-data-on-gcp'
-dataset_id = 'sales_data'
-client = bigquery.Client(project=project_id)
-dataset_ref = client.dataset(dataset_id)
-job_config = bigquery.LoadJobConfig()
-job_config.skip_leading_rows = 1
-job_config.autodetect = True
-job_config.source_format = bigquery.SourceFormat.CSV
-for file in files:
-    uri = "gs://big_data_landing_zone/"+file
-    load_job = client.load_table_from_uri(
-        uri, dataset_ref.table("sales"), job_config=job_config
-    )  # API request
-    print("Starting job {}".format(load_job.job_id))
 
-    load_job.result()  # Waits for table load to complete.
-    print("Job finished.")
+def loadFileToTable(project_id, dataset_id, table_name, bucket_name, files):
+    client = bigquery.Client(project=project_id)
+    dataset_ref = client.dataset(dataset_id)
+    job_config = bigquery.LoadJobConfig()
+    job_config.skip_leading_rows = 1
+    job_config.autodetect = True
+    job_config.source_format = bigquery.SourceFormat.CSV
+    for file in files:
+        uri = "gs://"+bucket_name+"/"+file
+        load_job = client.load_table_from_uri(
+            uri, dataset_ref.table(table_name), job_config=job_config
+        )  # API request
+        print("Starting job {}".format(load_job.job_id))
 
-    destination_table = client.get_table(dataset_ref.table("sales"))
-    print("Loaded {} rows.".format(destination_table.num_rows))
+        load_job.result()  # Waits for table load to complete.
+        print("Job finished.")
+
+        destination_table = client.get_table(dataset_ref.table(table_name))
+        print("Loaded {} rows.".format(destination_table.num_rows))
+
+zipextract('big_data_landing_zone', 'sales data-set.csv.zip', 'unzipped')  # if the file is gs://mybucket/path/file.zip
+files = list_blobs_with_prefix('big_data_landing_zone', 'unzipped')
+loadFileToTable('big-data-on-gcp','sales_data','sales','big_data_landing_zone',files)
+
