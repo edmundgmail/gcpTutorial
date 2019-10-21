@@ -5,7 +5,7 @@ from zipfile import ZipFile
 from zipfile import is_zipfile
 import io
 
-def zipextract(bucketname, zipfilename_with_path, target_path):
+def zipExtract(bucketname, zipfilename_with_path, target_path):
     storage_client = storage.Client()
     bucket = storage_client.get_bucket(bucketname)
 
@@ -21,7 +21,7 @@ def zipextract(bucketname, zipfilename_with_path, target_path):
                 blob = bucket.blob(target_path+"/"+contentfilename)
                 blob.upload_from_string(contentfile)
 
-def list_blobs_with_prefix(bucket_name, prefix):
+def listBlobsWithPrefix(bucket_name, prefix):
     storage_client = storage.Client()
     blobs = storage_client.list_blobs(bucket_name, prefix=prefix, delimiter=None)
     ret=[]
@@ -29,6 +29,13 @@ def list_blobs_with_prefix(bucket_name, prefix):
         ret.append(blob.name)
     return ret
 
+def deleteBlobWithPrefix(bucket_name, prefix):
+    storage_client = storage.Client()
+    bucket = storage_client.get_bucket(bucket_name)
+    blobs = storage_client.list_blobs(bucket_name, prefix=prefix, delimiter=None)
+    for blob in blobs:
+        blob.delete()
+        print('Blob {} deleted.'.format(blob.name))
 
 
 def loadFileToTable(project_id, dataset_id, table_name, bucket_name, files):
@@ -51,7 +58,11 @@ def loadFileToTable(project_id, dataset_id, table_name, bucket_name, files):
         destination_table = client.get_table(dataset_ref.table(table_name))
         print("Loaded {} rows.".format(destination_table.num_rows))
 
-zipextract('big_data_landing_zone', 'sales data-set.csv.zip', 'unzipped')  # if the file is gs://mybucket/path/file.zip
-files = list_blobs_with_prefix('big_data_landing_zone', 'unzipped')
-loadFileToTable('big-data-on-gcp','sales_data','sales','big_data_landing_zone',files)
 
+def loadTable():
+    zipExtract('big_data_landing_zone', 'sales data-set.csv.zip', 'unzipped')
+    files = listBlobsWithPrefix('big_data_landing_zone', 'unzipped')
+    loadFileToTable('big-data-on-gcp','sales_data','sales','big_data_landing_zone',files)
+    deleteBlobWithPrefix('big_data_landing_zone', 'unzipped')
+
+loadTable()
