@@ -58,7 +58,7 @@ from apache_beam.options.pipeline_options import SetupOptions
 
 
 bucket_name='big_data_landing_zone'
-project_id='big-data-on-gcp'
+project_id='big-data-on-gcp1'
 
 def run(argv=None, save_main_session=True):
 
