@@ -34,26 +34,13 @@ from apache_beam.options.pipeline_options import StandardOptions
 from google.cloud import bigquery
 import json
 import time
+from apache_beam.transforms.util import BatchElements
+
 from apache_beam.io.gcp.bigquery import parse_table_schema_from_json
+from googleapiclient import discovery
 
-class GroupWindowsIntoBatches(beam.PTransform):
-    """A composite transform that groups Pub/Sub messages based on publish
-    time and outputs a list of dictionaries, where each contains one message
-    and its publish timestamp.
-    """
-    def __init__(self, window_size):
-        # Convert minutes into seconds.
-        self.window_size = int(window_size * 60)
-
-    def expand(self, pcoll):
-        return (pcoll
-                # Assigns window info to each Pub/Sub message based on its
-                # publish timestamp.
-                | 'Window into Fixed Intervals' >> beam.WindowInto(window.FixedWindows(self.window_size))
-                | 'Add Dummy Key' >> beam.Map(lambda elem: (None, elem))
-                | 'Groupby' >> beam.GroupByKey()
-                | 'Abandon Dummy Key' >> beam.MapTuple(lambda _, val: val))
-
+project_id = 'big-data-on-gcp1'
+bucket_name='big-data-on-gcp-tweets-bucket'
 class DoAggregate(beam.DoFn):
     def __init__(self):
         pass
@@ -67,7 +54,7 @@ class DoAggregate(beam.DoFn):
 
 class ParseMessage(beam.DoFn):
     def __init__(self):
-        pass
+        return
 
     def process(self, element):
         tweet = (json.loads(element))
@@ -80,11 +67,64 @@ class ParseMessage(beam.DoFn):
             "coordinates_latitude": tweet["coordinates"]["coordinates"][0] if tweet["coordinates"] else 0,
             "coordinates_longitude": tweet["coordinates"]["coordinates"][0] if tweet["coordinates"] else 0,
             "place": tweet["place"]["country_code"] if tweet["place"] else None,
-            "user_id": tweet["user"]["id"],
-            "created_at": time.mktime(time.strptime(tweet["created_at"], "%a %b %d %H:%M:%S +0000 %Y"))
+            "user_id": tweet["user"]["id"]
         }
-        return processed_tweet
+        return [processed_tweet]
 
+def init_api():
+    global cmle_api
+
+    # If it hasn't been instantiated yet: do it now
+    if cmle_api is None:
+        cmle_api = discovery.build('ml', 'v1',
+                                   discoveryServiceUrl='https://storage.googleapis.com/cloud-ml/discovery/ml_v1_discovery.json',
+                                   cache_discovery=True)
+
+def estimate_cmle(instances):
+    """
+    Calls the tweet_sentiment_classifier API on CMLE to get predictions
+    Args:
+       instances: list of strings
+    Returns:
+        float: estimated values
+    """
+
+    # Init the CMLE calling api
+    init_api()
+
+    request_data = {'instances': instances}
+
+    logging.info("making request to the ML api")
+
+    # Call the model
+    model_url = 'projects/YOUR_PROJECT/models/tweet_sentiment_classifier'
+    response = cmle_api.projects().predict(body=request_data, name=model_url).execute()
+
+    # Read out the scores
+    values = [item["score"] for item in response['predictions']]
+
+    return values
+
+def estimate(messages):
+
+    # Be able to cope with a single string as well
+    if not isinstance(messages, list):
+        messages = [messages]
+
+    # Messages from pubsub are JSON strings
+    instances = list(map(lambda message: json.loads(message), messages))
+
+    # Estimate the sentiment of the 'text' of each tweet
+    scores = estimate_cmle([instance["text"] for instance in instances])
+
+    # Join them together
+    for i, instance in enumerate(instances):
+        instance['sentiment'] = scores[i]
+
+    logging.info("first message in batch")
+    logging.info(instances[0])
+
+    return instances
 
 class WriteBatchesToBigQuery(beam.DoFn):
     def __init__(self, dataset_id, table_id):
@@ -97,26 +137,46 @@ class WriteBatchesToBigQuery(beam.DoFn):
         """Write one batch per file to a Google Cloud Storage bucket. """
         rows_to_insert = []
         for element in batch:
+            print(element)
             rows_to_insert.append(element)
 
         #error = self.client.insert_rows(self.table, rows_to_insert)
         #assert error == []
 
+def getschema():
+    bigqueryschema_json = '{"fields": [' \
+                          '{"name":"id","type":"STRING"},' \
+                          '{"name":"place","type":"STRING"},' \
+                          '{"name":"user_id","type":"STRING"},' \
+                          '{"name":"coordinates_latitude","type":"FLOAT"},' \
+                          '{"name":"coordinates_longitude","type":"FLOAT"}' \
+                          ']}'
+    bigqueryschema = parse_table_schema_from_json(bigqueryschema_json)
+
+    bigqueryschema_mean_json = '{"fields": [' \
+                               '{"name":"posted_at","type":"TIMESTAMP"},' \
+                               '{"name":"sentiment","type":"FLOAT"}' \
+                               ']}'
+    bigqueryschema_mean = parse_table_schema_from_json(bigqueryschema_mean_json)
+    return (bigqueryschema, bigqueryschema_mean)
+
+class FormatDoFn(beam.DoFn):
+  def process(self, element, window=beam.DoFn.WindowParam):
+    ts_format = '%Y-%m-%d %H:%M:%S.%f UTC'
+    window_start = window.start.to_utc_datetime().strftime(ts_format)
+    window_end = window.end.to_utc_datetime().strftime(ts_format)
+    return [{'word': element[0],
+             'count': element[1],
+             'window_start':window_start,
+             'window_end':window_end}]
+
 def run(argv=None, save_main_session=True):
   """Build and run the pipeline."""
   parser = argparse.ArgumentParser()
-  parser.add_argument(
-      '--output_dataset_id', required=True,
-      help=('Output BigQuery table Name'))
 
   parser.add_argument(
-      '--output_table_id', required=True,
+      '--output_table', required=True,
       help=('Output BigQuery table Name'))
-
-  parser.add_argument(
-      '--output_average_table_id', required=True,
-      help=('Output BigQuery table Name'))
-
 
   parser.add_argument(
       '--input_topic',
@@ -130,6 +190,22 @@ def run(argv=None, save_main_session=True):
 
   known_args, pipeline_args = parser.parse_known_args(argv)
 
+  pipeline_args.extend([
+      # CHANGE 2/5: (OPTIONAL) Change this to DataflowRunner to
+      # run your pipeline on the Google Cloud Dataflow Service.
+      '--runner=DirectRunner',
+      # CHANGE 3/5: Your project ID is required in order to run your pipeline on
+      # the Google Cloud Dataflow Service.
+      '--project='+ project_id,
+      # CHANGE 4/5: Your Google Cloud Storage path is required for staging local
+      # files.
+      '--staging_location=gs://'+bucket_name+'/dataflow',
+      # CHANGE 5/5: Your Google Cloud Storage path is required for temporary
+      # files.
+      '--temp_location=gs://'+bucket_name+'/dataflow_temp',
+      '--job_name=streaming-tweets-into-bq',
+  ])
+
   # We use the save_main_session option because one or more DoFn's in this
   # workflow rely on global context (e.g., a module imported at module level).
   pipeline_options = PipelineOptions(pipeline_args)
@@ -140,16 +216,39 @@ def run(argv=None, save_main_session=True):
 
   processed_tweets = (pipeline
        | 'Read PubSub Messages' >> beam.io.ReadFromPubSub(topic=known_args.input_topic)
-       | 'decode' >> beam.Map( lambda x: x.decode('utf-8'))
-        | 'Parse Message' >> beam.ParDo(ParseMessage())
-       | 'Window into' >> GroupWindowsIntoBatches(known_args.window_size))
+       | 'Parse Message' >> beam.ParDo(ParseMessage()))
+       #| 'assign window key' >> beam.WindowInto(window.FixedWindows(10)))
+       #| 'group by window key' >> beam.GroupByKey()
+       #| 'Format' >> beam.ParDo(FormatDoFn()))
+       #| 'predict sentiment' >> beam.FlatMap(lambda messages: estimate(messages)))
+       # | 'group' >> beam.map(lambda messages: estimate(messages)))
 
-  processed_tweets | 'Write to BigQuery' >> beam.ParDo(WriteBatchesToBigQuery(known_args.output_dataset_id, known_args.output_table_id))
+  #processed_tweets | 'Write to BigQuery' >> beam.ParDo(WriteBatchesToBigQuery(known_args.output_dataset_id, known_args.output_table_id))
 
   #processed_tweets | 'Average' >> beam.parDo(DoAggregate) | 'Write average to Big Query' >> beam.Pardo(WriteBatchesToBigQuery(known_args.output_dataset_id, known_args.output_average_table_id))
+
+  #(bigqueryschema,  bigqueryschema_mean) = getschema()
+
+  #processed_tweets | 'store twitter posts' >> beam.io.WriteToBigQuery(
+  #    table="mytable",
+  #    dataset="mydataset",
+  #    schema=bigqueryschema,
+  #    write_disposition=beam.io.BigQueryDisposition.WRITE_APPEND,
+  #    create_disposition=beam.io.BigQueryDisposition.CREATE_IF_NEEDED,
+  #    project="big-data-on-gcp1"
+  #)
+
+
+  TABLE_SCHEMA = ('id:STRING, lang:STRING, retweeted_id:STRING, favorite_count:LONG, retweet_count:INT, place:STRING, user_id:STRING, coordinates_latitude:FLOAT, coordinates_longitude:FLOAT')
+
+  processed_tweets | 'Write' >> beam.io.WriteToBigQuery(
+      table=known_args.output_table,
+      schema=TABLE_SCHEMA,
+      create_disposition=beam.io.BigQueryDisposition.CREATE_IF_NEEDED,
+      write_disposition=beam.io.BigQueryDisposition.WRITE_APPEND)
 
   result = pipeline.run()
   result.wait_until_finish()
 if __name__ == '__main__':
-  logging.getLogger().setLevel(logging.INFO)
+  logging.getLogger().setLevel(logging.DEBUG)
   run()
