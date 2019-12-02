@@ -69,7 +69,7 @@ class ParseMessage(beam.DoFn):
             "place": tweet["place"]["country_code"] if tweet["place"] else None,
             "user_id": tweet["user"]["id"]
         }
-        return [processed_tweet]
+        return [(1, processed_tweet)]
 
 def init_api():
     global cmle_api
@@ -139,36 +139,18 @@ class WriteBatchesToBigQuery(beam.DoFn):
         for element in batch:
             print(element)
             rows_to_insert.append(element)
+            yield beam.window.TimestampedValue(element, time)
 
         #error = self.client.insert_rows(self.table, rows_to_insert)
         #assert error == []
 
-def getschema():
-    bigqueryschema_json = '{"fields": [' \
-                          '{"name":"id","type":"STRING"},' \
-                          '{"name":"place","type":"STRING"},' \
-                          '{"name":"user_id","type":"STRING"},' \
-                          '{"name":"coordinates_latitude","type":"FLOAT"},' \
-                          '{"name":"coordinates_longitude","type":"FLOAT"}' \
-                          ']}'
-    bigqueryschema = parse_table_schema_from_json(bigqueryschema_json)
-
-    bigqueryschema_mean_json = '{"fields": [' \
-                               '{"name":"posted_at","type":"TIMESTAMP"},' \
-                               '{"name":"sentiment","type":"FLOAT"}' \
-                               ']}'
-    bigqueryschema_mean = parse_table_schema_from_json(bigqueryschema_mean_json)
-    return (bigqueryschema, bigqueryschema_mean)
 
 class FormatDoFn(beam.DoFn):
   def process(self, element, window=beam.DoFn.WindowParam):
     ts_format = '%Y-%m-%d %H:%M:%S.%f UTC'
     window_start = window.start.to_utc_datetime().strftime(ts_format)
     window_end = window.end.to_utc_datetime().strftime(ts_format)
-    return [{'word': element[0],
-             'count': element[1],
-             'window_start':window_start,
-             'window_end':window_end}]
+    return element[1]
 
 def run(argv=None, save_main_session=True):
   """Build and run the pipeline."""
@@ -216,7 +198,10 @@ def run(argv=None, save_main_session=True):
 
   processed_tweets = (pipeline
        | 'Read PubSub Messages' >> beam.io.ReadFromPubSub(topic=known_args.input_topic)
-       | 'Parse Message' >> beam.ParDo(ParseMessage()))
+       | 'Parse Message' >> beam.ParDo(ParseMessage())
+       | beam.WindowInto(window.FixedWindows(2 * 60, 0))
+       | 'Group' >> beam.GroupByKey()
+       | 'Format' >> beam.ParDo(FormatDoFn()))
        #| 'assign window key' >> beam.WindowInto(window.FixedWindows(10)))
        #| 'group by window key' >> beam.GroupByKey()
        #| 'Format' >> beam.ParDo(FormatDoFn()))
@@ -239,7 +224,8 @@ def run(argv=None, save_main_session=True):
   #)
 
 
-  TABLE_SCHEMA = ('id:STRING, lang:STRING, retweeted_id:STRING, favorite_count:LONG, retweet_count:INT, place:STRING, user_id:STRING, coordinates_latitude:FLOAT, coordinates_longitude:FLOAT')
+  TABLE_SCHEMA = ('id:STRING, lang:STRING, retweeted_id:STRING, favorite_count:INT64, retweet_count:INT64, place:STRING, user_id:STRING, coordinates_latitude:FLOAT64, coordinates_longitude:FLOAT64')
+
 
   processed_tweets | 'Write' >> beam.io.WriteToBigQuery(
       table=known_args.output_table,
@@ -247,8 +233,10 @@ def run(argv=None, save_main_session=True):
       create_disposition=beam.io.BigQueryDisposition.CREATE_IF_NEEDED,
       write_disposition=beam.io.BigQueryDisposition.WRITE_APPEND)
 
+
+
   result = pipeline.run()
   result.wait_until_finish()
 if __name__ == '__main__':
-  logging.getLogger().setLevel(logging.DEBUG)
+  logging.getLogger().setLevel(logging.INFO)
   run()

@@ -5,6 +5,6 @@ google-api-python-client==1.7.11
 gcsfs
 future
 apache-beam[gcp]
-
+pandas
 
 

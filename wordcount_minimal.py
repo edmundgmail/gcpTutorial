@@ -78,7 +78,7 @@ def run(argv=None, save_main_session=True):
   pipeline_args.extend([
       # CHANGE 2/5: (OPTIONAL) Change this to DataflowRunner to
       # run your pipeline on the Google Cloud Dataflow Service.
-      '--runner=DataflowRunner',
+      '--runner=DirectRunner',
       # CHANGE 3/5: Your project ID is required in order to run your pipeline on
       # the Google Cloud Dataflow Service.
       '--project='+project_id,
@@ -88,7 +88,7 @@ def run(argv=None, save_main_session=True):
       # CHANGE 5/5: Your Google Cloud Storage path is required for temporary
       # files.
       '--temp_location=gs://'+bucket_name+'/dataflow_temp',
-      '--job_name=your-wordcount-job',
+      '--job_name=your-wordcount-job-1',
   ])
 
   # We use the save_main_session option because one or more DoFn's in this
@@ -96,12 +96,18 @@ def run(argv=None, save_main_session=True):
   pipeline_options = PipelineOptions(pipeline_args)
   pipeline_options.view_as(SetupOptions).save_main_session = save_main_session
 
+  output1 = []
+
+  def collect(row):
+      output1.append(row)
+      return True
 
   with beam.Pipeline(options=pipeline_options) as p:
 
 
     # Read the text file[pattern] into a PCollection.
     lines = p | ReadFromText(known_args.input)
+    lines | "print" >> beam.Map(collect)
 
     # Count the occurrences of each word.
     counts = (
@@ -123,6 +129,8 @@ def run(argv=None, save_main_session=True):
     # pylint: disable=expression-not-assigned
     output | WriteToText(known_args.output)
 
+    # print the output
+    print(output1)
 
 if __name__ == '__main__':
   logging.getLogger().setLevel(logging.INFO)
